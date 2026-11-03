@@ -2,7 +2,7 @@
 
 ## Status as of 2026-11-03
 
-First pass, from BDS 1.26.60. Not yet tested in game or compared with BDS.
+Written from BDS 1.26.60's code and not fully tested. Basic wire, repeaters, torches, lamps and comparators have been tried in game through Helix; nothing has been compared with BDS side by side.
 
 **Built:** wire, torches with burn out and torch rings, repeaters with delay and locking, comparators,
 producers, directional producers, pulse capacitors, consumers, powered blocks, path finding, and
