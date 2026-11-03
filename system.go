@@ -1,5 +1,10 @@
 package redstone
 
+import (
+	"cmp"
+	"slices"
+)
+
 // DefaultInterval is how many game ticks pass between evaluations, BDS's value.
 const DefaultInterval = 2
 
@@ -261,6 +266,11 @@ func (g *System) Tick() bool {
 	return false
 }
 
+// SignalTick reports whether block actors read what they feed the circuit this
+// tick, as a comparator does what is behind it: BDS's counter is below the
+// interval. Valid after Tick.
+func (g *System) SignalTick() bool { return g.counter < g.Interval }
+
 // UpdateDependencies applies the removals and additions queued since last time
 // and works out the paths they changed. w may be nil, in which case no powered
 // blocks are found.
@@ -304,16 +314,17 @@ func (g *System) removeNow(pos Pos, c *Component) {
 	for i := range c.sources {
 		g.schedule(c.sources[i].pos, c.sources[i].c)
 	}
-	for i := range c.side {
-		g.schedule(c.side[i].pos, c.side[i].c)
-	}
 	for len(c.dests) > 0 {
 		d := c.dests[0].c
 		c.dests = c.dests[1:]
-		g.scheduleAround(d)
+		g.schedule(d.pos, d)
 		d.removeSourceOfLeaving(c)
 	}
-	g.scheduleNear(pos)
+	for f := Down; f < NoFace; f++ {
+		if n := g.live(pos.Side(f)); n != nil {
+			g.scheduleAround(n)
+		}
+	}
 }
 
 // removeSourceOfLeaving drops c from the lists without touching c's own counts.
@@ -631,6 +642,129 @@ func (g *System) flowsTo(pos Pos, f Face) bool {
 // climbable is whether c is wire another wire can connect to over a level.
 func (g *System) climbable(c *Component) bool {
 	return c.kind != KindRepeater && c.kind != KindPulse && c.kind.group() == KindWire
+}
+
+// Merge moves everything src holds into g, which keeps its components where both
+// have one and its own place in the interval: src's circuits may evaluate a tick
+// sooner or later once. src is empty afterwards. Neither may be ticking.
+func (g *System) Merge(src *System) {
+	for _, c := range src.order {
+		if _, ok := g.all[c.pos]; ok {
+			continue
+		}
+		g.all[c.pos] = c
+		g.order = append(g.order, c)
+	}
+	for _, l := range src.chunks {
+		if own, ok := g.byChunk[l.origin]; ok {
+			own.entries = append(own.entries, l.entries...)
+			continue
+		}
+		g.byChunk[l.origin] = l
+		g.chunks = append(g.chunks, l)
+	}
+	for pos, list := range src.relation {
+		g.relation[pos] = append(g.relation[pos], list...)
+	}
+	for pos, list := range src.waiting {
+		g.waiting[pos] = append(g.waiting[pos], list...)
+	}
+	for pos := range src.updating {
+		g.updating[pos] = true
+	}
+	g.adds = append(g.adds, src.adds...)
+	g.updates = append(g.updates, src.updates...)
+	g.removals = append(g.removals, src.removals...)
+	*src = *New()
+}
+
+// RecheckWaiting works out again the paths that stopped at a chunk that can be
+// read now, as after a merge brought it in. Chunks go in position order, so the
+// result does not depend on the map.
+func (g *System) RecheckWaiting(w World) {
+	origins := make([]Pos, 0, len(g.waiting))
+	for origin := range g.waiting {
+		if w.Loaded(origin) {
+			origins = append(origins, origin)
+		}
+	}
+	slices.SortFunc(origins, func(a, b Pos) int {
+		return cmp.Or(cmp.Compare(a.X, b.X), cmp.Compare(a.Z, b.Z))
+	})
+	for _, origin := range origins {
+		g.ChunkLoaded(origin)
+	}
+}
+
+// SplitOff moves the chunks in says into to, an empty System. Links between the
+// two are cut, as the two tick apart from now on, and paths that used one are
+// worked out again. Neither may be ticking.
+func (g *System) SplitOff(to *System, in func(origin Pos) bool) {
+	to.Interval, to.counter = g.Interval, g.counter
+	moved := map[*Component]bool{}
+	for _, c := range g.order {
+		if in(c.chunk) {
+			moved[c] = true
+			to.all[c.pos] = c
+			to.order = append(to.order, c)
+			delete(g.all, c.pos)
+		}
+	}
+	g.order = slices.DeleteFunc(g.order, func(c *Component) bool { return moved[c] })
+	for _, l := range g.chunks {
+		if in(l.origin) {
+			to.byChunk[l.origin] = l
+			to.chunks = append(to.chunks, l)
+			delete(g.byChunk, l.origin)
+		}
+	}
+	g.chunks = slices.DeleteFunc(g.chunks, func(l *chunkList) bool { return in(l.origin) })
+	for pos, list := range g.relation {
+		if in(pos.Chunk()) {
+			to.relation[pos] = list
+			delete(g.relation, pos)
+		}
+	}
+	for origin, list := range g.waiting {
+		if in(origin) {
+			to.waiting[origin] = list
+			delete(g.waiting, origin)
+		}
+	}
+	movePending := func(list []pending) (kept, gone []pending) {
+		for _, p := range list {
+			if in(p.pos.Chunk()) {
+				gone = append(gone, p)
+			} else {
+				kept = append(kept, p)
+			}
+		}
+		return kept, gone
+	}
+	g.adds, to.adds = movePending(g.adds)
+	g.removals, to.removals = movePending(g.removals)
+	g.updates, to.updates = movePending(g.updates)
+	for _, p := range to.updates {
+		to.updating[p.pos] = true
+		delete(g.updating, p.pos)
+	}
+	cutLinks(g, moved, false)
+	cutLinks(to, moved, true)
+}
+
+// cutLinks drops the sources of g's components that now live in the other System,
+// and queues what they fed to find its paths again. isMoved says which side g is.
+func cutLinks(g *System, moved map[*Component]bool, isMoved bool) {
+	for _, c := range g.order {
+		other := func(s *source) bool { return moved[s.c] != isMoved }
+		if !slices.ContainsFunc(c.sources, func(s source) bool { return other(&s) }) &&
+			!slices.ContainsFunc(c.side, func(s source) bool { return other(&s) }) {
+			continue
+		}
+		c.sources = c.dropSources(c.sources, other)
+		c.side = c.dropSources(c.side, other)
+		g.scheduleAround(c)
+	}
 }
 
 // Evaluate runs one round of every loaded chunk's components, in BDS's phases:

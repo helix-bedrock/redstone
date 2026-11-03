@@ -172,6 +172,13 @@ func (c *Component) SetRearSignal(signal int32) {
 	c.rear, c.dirty = max(signal, -1), true
 }
 
+// LoadSignal restores a comparator's output from what its block saved, so loading
+// it changes nothing until its inputs say so.
+func (c *Component) LoadSignal(signal int32) {
+	c.previous, c.strength = int16(signal), int16(signal) //nolint:gosec // at most maxPower
+	c.next, c.rear = signal, signal
+}
+
 // Strength returns the component's strength, which depends on its kind.
 func (c *Component) Strength() int16 {
 	switch c.kind {

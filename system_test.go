@@ -141,14 +141,94 @@ func TestRemoveDropsSource(t *testing.T) {
 
 func TestInterval(t *testing.T) {
 	g := New()
-	var due []bool
-	for range 5 {
-		due = append(due, g.Tick())
-	}
 	want := []bool{true, false, true, false, true}
 	for i := range want {
-		if due[i] != want[i] {
-			t.Fatalf("tick %d: due %v, want %v", i, due[i], want[i])
+		if due := g.Tick(); due != want[i] {
+			t.Fatalf("tick %d: due %v, want %v", i, due, want[i])
 		}
+		// BDS's counter is 1 after an evaluation, then 2: block actors read on the
+		// first of those.
+		if read := g.SignalTick(); read != want[i] {
+			t.Fatalf("tick %d: signal tick %v, want %v", i, read, want[i])
+		}
+	}
+}
+
+func TestLoadSignalKeepsOutput(t *testing.T) {
+	g, w := New(), newTestWorld()
+	p := Pos{X: 1}
+	c := g.Create(p, KindComparator, North)
+	c.LoadSignal(7)
+	run(g, w, 2)
+	if got := c.Strength(); got != 7 {
+		t.Fatalf("strength after load: %d, want 7", got)
+	}
+	if _, told := w.changes[p]; told {
+		t.Fatal("a loaded comparator told its block it changed")
+	}
+}
+
+func TestMergeKeepsCircuit(t *testing.T) {
+	g, other, w := New(), New(), newTestWorld()
+	lever(g, Pos{}, true)
+	wire := other.Create(Pos{X: 1}, KindWire, Down)
+	g.UpdateDependencies(w)
+	other.UpdateDependencies(w)
+	g.Merge(other)
+	if other.At(Pos{X: 1}) != nil {
+		t.Fatal("merged System still holds the wire")
+	}
+	if g.At(Pos{X: 1}) != wire {
+		t.Fatal("wire did not move")
+	}
+	g.Invalidate(Pos{X: 1})
+	g.schedule(Pos{}, g.At(Pos{}))
+	run(g, w, 2)
+	if got := wire.Strength(); got != maxPower {
+		t.Fatalf("wire after merge: %d, want %d", got, maxPower)
+	}
+}
+
+func TestSplitOffCutsLinks(t *testing.T) {
+	g, to, w := New(), New(), newTestWorld()
+	lever(g, Pos{X: 14}, true)
+	far := Pos{X: 16}
+	wire := g.Create(Pos{X: 15}, KindWire, Down)
+	moved := g.Create(far, KindWire, Down)
+	run(g, w, 2)
+	if moved.Strength() == 0 {
+		t.Fatal("wire across the chunks has no power before the split")
+	}
+	g.SplitOff(to, func(origin Pos) bool { return origin.X == 16 })
+	if g.At(far) != nil || to.At(far) != moved {
+		t.Fatal("wire did not move")
+	}
+	if len(moved.sources) != 0 {
+		t.Fatalf("moved wire keeps %d sources from the other side", len(moved.sources))
+	}
+	if g.At(Pos{X: 15}) != wire {
+		t.Fatal("wire that stays went away")
+	}
+	for i := range wire.dests {
+		if wire.dests[i].c == moved {
+			t.Fatal("wire that stays still feeds the moved one")
+		}
+	}
+}
+
+func TestRemovalQueuesNeighbours(t *testing.T) {
+	g, w := New(), newTestWorld()
+	lever(g, Pos{}, true)
+	mid := Pos{X: 1}
+	g.Create(mid, KindWire, Down)
+	end := g.Create(Pos{X: 2}, KindWire, Down)
+	run(g, w, 2)
+	if end.Strength() == 0 {
+		t.Fatal("no power along the wire")
+	}
+	g.Remove(mid)
+	run(g, w, 2)
+	if got := end.Strength(); got != 0 {
+		t.Fatalf("wire past the gap: %d, want 0", got)
 	}
 }

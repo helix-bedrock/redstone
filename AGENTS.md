@@ -36,6 +36,10 @@ BDS keeps its chunks' components in a hash map and evaluates them in that map's
 order. Here chunks run in the order their first component was added, so the order
 is repeatable. Only circuits spread over several chunks could notice.
 
+BDS has one System per dimension. An engine that ticks regions apart has one per region, and moves
+components with `Merge` and `SplitOff`. Each keeps its own place in the interval, so a merge can move
+the absorbed circuits' evaluation by one tick, once.
+
 ## Status
 
 Status lives in [STATUS.md](STATUS.md) under "Status as of <date>"; refresh it with
