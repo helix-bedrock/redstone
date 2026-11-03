@@ -8,7 +8,7 @@ Written from BDS 1.26.60's code and not fully tested. Basic wire, repeaters, tor
 producers, directional producers, pulse capacitors, consumers, powered blocks, path finding, and
 evaluation every 2 game ticks in BDS's four phases.
 
-**Not built:** piston consumers and rail transporters.
+**Not built:** rail transporters. A piston is a consumer with one blocked face (`SetBlockedFace`).
 
 **Also here:** comparators restored from their saved output (`LoadSignal`), `SignalTick` for block
 actors that read on BDS's ticks, and `Merge` and `SplitOff` to move circuits between Systems without

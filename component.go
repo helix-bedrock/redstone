@@ -60,6 +60,9 @@ type Component struct {
 	attach    bool
 	stopPower bool
 	allowed   uint8
+	// blocked is the face a consumer takes nothing on, if hasBlocked.
+	blocked    Face
+	hasBlocked bool
 
 	// Consumer. directlyPowered is whether the last evaluation's winner was
 	// direct, sideInput a consumer that checks where wire comes from, viaDirect
@@ -131,6 +134,10 @@ func (c *Component) SetAnyDirection(on bool) { c.anyDirection = on }
 
 // SetIgnoreFirst skips the first report, for blocks that keep their saved state.
 func (c *Component) SetIgnoreFirst(on bool) { c.ignoreFirst = on }
+
+// SetBlockedFace stops a consumer taking signal arriving on this face, as a piston's
+// front does.
+func (c *Component) SetBlockedFace(f Face) { c.blocked, c.hasBlocked = f, true }
 
 // SetAllowedFaces limits a directional producer to these faces, one bit each.
 func (c *Component) SetAllowedFaces(faces uint8) { c.allowed = faces }
@@ -702,6 +709,9 @@ func (c *Component) addSource(t *tracking, damping *int32, direct *bool) bool {
 }
 
 func (c *Component) addToConsumer(t *tracking, damping *int32, direct *bool) bool {
+	if c.hasBlocked && t.current.face == c.blocked {
+		return false
+	}
 	kind := t.nearest.kind
 	was := *direct
 	*direct = false
