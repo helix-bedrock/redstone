@@ -61,6 +61,7 @@ type Kind uint32
 
 // The kinds, with BDS's values.
 const (
+	KindRail       Kind = 0x10000
 	KindConsumer   Kind = 0x20000
 	KindPowered    Kind = 0x40000
 	KindProducer   Kind = 0x80000

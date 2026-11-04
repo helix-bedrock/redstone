@@ -1,6 +1,6 @@
 # Status
 
-## Status as of 2026-11-03
+## Status as of 2026-11-04
 
 Written from BDS 1.26.60's code and not fully tested. Basic wire, repeaters, torches, lamps and comparators have been tried in game through Helix; nothing has been compared with BDS side by side.
 
@@ -8,7 +8,9 @@ Written from BDS 1.26.60's code and not fully tested. Basic wire, repeaters, tor
 producers, directional producers, pulse capacitors, consumers, powered blocks, path finding, and
 evaluation every 2 game ticks in BDS's four phases.
 
-**Not built:** rail transporters. A piston is a consumer with one blocked face (`SetBlockedFace`).
+**Rails:** `KindRail` is BDS's rail transporter: a reach of nine from a source, carried only along rails of the same group and direction. Its strength is that reach, not a signal strength.
+
+A piston is a consumer with one blocked face (`SetBlockedFace`).
 
 **Observers** are pulse capacitors, as in BDS; nothing new was needed for them here.
 

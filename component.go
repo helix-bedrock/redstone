@@ -30,6 +30,8 @@ type source struct {
 	// data is a rule's own mark: from the back for a repeater, reached through
 	// another consumer for a consumer.
 	data bool
+	// reach is what a rail makes of this source: how many more rails it carries on to.
+	reach int32
 }
 
 // dest is a component fed by another, counted per source entry.
@@ -72,6 +74,10 @@ type Component struct {
 
 	// Powered block.
 	promoted, conducts bool
+
+	// Rail. railGroup is which rails it joins: powered rails only carry to powered
+	// rails, activator rails to activator rails.
+	railGroup int32
 
 	// Wire.
 	cached int32
@@ -150,6 +156,9 @@ func (c *Component) SetFromCapacitor(on bool) { c.fromCapacitor = on }
 
 // SetHalfPulse makes a consumer see a torch's half pulse as its real strength.
 func (c *Component) SetHalfPulse(on bool) { c.halfPulse = on }
+
+// SetRailGroup sets which rails a rail joins.
+func (c *Component) SetRailGroup(group int32) { c.railGroup = group }
 
 // SetDelay sets a repeater's delay in redstone ticks minus one, 0 to 3.
 func (c *Component) SetDelay(delay int32) { c.delay = max(0, min(delay, 3)) }
@@ -318,8 +327,24 @@ func (c *Component) evaluate() bool {
 		return c.evaluateRepeater()
 	case KindComparator:
 		return c.evaluateComparator()
+	case KindRail:
+		return c.evaluateRail()
 	}
 	return false
+}
+
+// evaluateRail takes the longest reach of a source that is on. Its strength is that
+// reach, not a redstone strength.
+func (c *Component) evaluateRail() bool {
+	previous := c.strength
+	c.strength = 0
+	for i := range c.sources {
+		s := &c.sources[i]
+		if s.reach > int32(c.strength) && int32(s.c.Strength()) > s.damping {
+			c.strength = int16(s.reach) //nolint:gosec // at most railReach
+		}
+	}
+	return c.strength != previous
 }
 
 // evaluateConsumer takes the strongest source. A half pulse counts as full
@@ -704,8 +729,56 @@ func (c *Component) addSource(t *tracking, damping *int32, direct *bool) bool {
 		c.addToRepeater(t, damping, direct)
 	case KindComparator:
 		c.addToComparator(t, damping, direct)
+	case KindRail:
+		return c.addToRail(t, damping, direct)
 	}
 	return false
+}
+
+// railReach is how far rails carry the power of one source: this rail and eight more.
+const railReach = 9
+
+// addToRail is BDS's rail transporter. Power from anything else starts a new reach;
+// power along the rails is what the rail before had, one shorter, still read from the
+// component the search began at.
+func (c *Component) addToRail(t *tracking, damping *int32, direct *bool) bool {
+	if !*direct {
+		return false
+	}
+	if t.nearest.kind != KindRail {
+		return c.addRailSource(source{
+			c: t.origin.c, damping: max(*damping, 1) - 1, pos: t.origin.pos, face: t.current.face, direct: true, reach: railReach,
+		})
+	}
+	added := false
+	for _, s := range t.nearest.c.sources {
+		if s.reach < 2 {
+			continue
+		}
+		if c.addRailSource(source{
+			c: t.origin.c, damping: max(s.damping, 0), pos: s.pos, face: t.current.face, direct: true, reach: s.reach - 1,
+		}) {
+			added = true
+		}
+	}
+	return added
+}
+
+// addRailSource adds s unless the rail has it already. Two entries may share a component:
+// they differ by where the power began.
+func (c *Component) addRailSource(s source) bool {
+	for i := range c.sources {
+		o := &c.sources[i]
+		if o.pos == s.pos && o.reach == s.reach && o.damping == s.damping {
+			return false
+		}
+	}
+	if s.c == nil {
+		return false
+	}
+	c.sources = append(c.sources, s)
+	s.c.addDest(c)
+	return true
 }
 
 func (c *Component) addToConsumer(t *tracking, damping *int32, direct *bool) bool {
@@ -972,6 +1045,10 @@ func (c *Component) allowConnection(g *System, t *tracking, direct *bool) bool {
 		return c.allowTorch(t)
 	case KindWire:
 		return c.allowWire(g, t, direct)
+	case KindRail:
+		f := t.current.face
+		return t.current.kind == KindRail && t.current.c.railGroup == c.railGroup && t.current.c.dir == c.dir &&
+			(f == c.dir || f == c.dir.Opposite())
 	}
 	return true
 }
