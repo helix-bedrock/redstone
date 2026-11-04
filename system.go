@@ -8,12 +8,28 @@ import (
 // DefaultInterval is how many game ticks pass between evaluations, BDS's value.
 const DefaultInterval = 2
 
-// loadRadius is how far around a chunk everything must be loaded for its
-// components to evaluate.
-const loadRadius = 32
+// Rules are the numbers circuits run by. [DefaultRules] gives BDS's; anything else
+// stops being vanilla, on purpose.
+type Rules struct {
+	// SignalReach is how far a signal may travel, in blocks of wire. A signal is
+	// used up after 15 whatever this says, so more than 15 changes nothing there.
+	SignalReach int32
+	// BurnOutFlips is how many flips a torch makes before it stops.
+	BurnOutFlips int32
+	// BurnOutLimit is where that count stops, and the torch stays burnt out until a
+	// neighbour changes.
+	BurnOutLimit int32
+	// RailReach is how far rails carry the power of one source, counting the first.
+	RailReach int32
+	// LoadRadius is how many blocks around a chunk must be loaded for its components
+	// to evaluate.
+	LoadRadius int32
+}
 
-// maxDamping is how far a signal may travel.
-const maxDamping = 15
+// DefaultRules returns BDS's numbers.
+func DefaultRules() Rules {
+	return Rules{SignalReach: 15, BurnOutFlips: 16, BurnOutLimit: 33, RailReach: 9, LoadRadius: 32}
+}
 
 // sides are the four horizontal faces in BDS's order.
 var sides = [...]Face{North, South, West, East}
@@ -69,6 +85,9 @@ type System struct {
 	// at any time.
 	Interval int
 
+	// rules is shared with every component here, so changing it reaches them all.
+	rules *Rules
+
 	locked    bool
 	counter   int
 	evaluated bool
@@ -90,12 +109,21 @@ type System struct {
 
 // New returns an empty System.
 func New() *System {
+	rules := DefaultRules()
 	return &System{
-		Interval: DefaultInterval, counter: DefaultInterval,
+		Interval: DefaultInterval, counter: DefaultInterval, rules: &rules,
 		all: map[Pos]*Component{}, byChunk: map[Pos]*chunkList{},
 		relation: map[Pos][]related{}, waiting: map[Pos][]Pos{}, updating: map[Pos]bool{},
 	}
 }
+
+// Rules returns the numbers this System runs by.
+func (g *System) Rules() Rules { return *g.rules }
+
+// SetRules changes the numbers this System runs by, from the next thing that reads
+// one. Paths already found keep the reach they were found with until they are worked
+// out again.
+func (g *System) SetRules(r Rules) { *g.rules = r }
 
 // Lock stops components being created or removed while locked. An engine holds
 // it while it sets a block because of the circuit, so setting that block does
@@ -155,7 +183,7 @@ func (g *System) Create(pos Pos, k Kind, dir Face) *Component {
 	if c := g.Component(pos, k); c != nil || g.locked {
 		return c
 	}
-	c := newComponent(k)
+	c := newComponent(k, g.rules)
 	c.pos, c.chunk, c.dir = pos, pos.Chunk(), dir
 	g.add(pos, c)
 	return g.Component(pos, k)
@@ -452,7 +480,7 @@ func (g *System) findRelationships(pos Pos, c *Component, w World) {
 	g.queue = append(g.queue[:0], tracking{current: start, origin: start, nearest: start, second: start, direct: true})
 	for head := 0; head < len(g.queue); head++ {
 		t := g.queue[head]
-		if t.damping > maxDamping {
+		if t.damping > g.rules.SignalReach {
 			continue
 		}
 		if t.nearest.kind != KindPowered {
@@ -488,7 +516,7 @@ func (g *System) findBlocks(pos Pos, w World) {
 		if power == PowerNone {
 			continue
 		}
-		c := newComponent(KindPowered)
+		c := newComponent(KindPowered, g.rules)
 		c.pos, c.chunk, c.dir = n, n.Chunk(), NoFace
 		c.first = false
 		if power == PowerInsulator {
@@ -652,8 +680,12 @@ func (g *System) Merge(src *System) {
 		if _, ok := g.all[c.pos]; ok {
 			continue
 		}
+		c.rules = g.rules
 		g.all[c.pos] = c
 		g.order = append(g.order, c)
+	}
+	for i := range src.adds {
+		src.adds[i].c.rules = g.rules
 	}
 	for _, l := range src.chunks {
 		if own, ok := g.byChunk[l.origin]; ok {
@@ -701,10 +733,12 @@ func (g *System) RecheckWaiting(w World) {
 // worked out again. Neither may be ticking.
 func (g *System) SplitOff(to *System, in func(origin Pos) bool) {
 	to.Interval, to.counter = g.Interval, g.counter
+	*to.rules = *g.rules
 	moved := map[*Component]bool{}
 	for _, c := range g.order {
 		if in(c.chunk) {
 			moved[c] = true
+			c.rules = to.rules
 			to.all[c.pos] = c
 			to.order = append(to.order, c)
 			delete(g.all, c.pos)
@@ -742,6 +776,9 @@ func (g *System) SplitOff(to *System, in func(origin Pos) bool) {
 		return kept, gone
 	}
 	g.adds, to.adds = movePending(g.adds)
+	for i := range to.adds {
+		to.adds[i].c.rules = to.rules
+	}
 	g.removals, to.removals = movePending(g.removals)
 	g.updates, to.updates = movePending(g.updates)
 	for _, p := range to.updates {
@@ -772,7 +809,7 @@ func cutLinks(g *System, moved map[*Component]bool, isMoved bool) {
 // else, then repeaters lock. Chunks run in the order their first component came.
 func (g *System) Evaluate(w World) {
 	for _, l := range g.chunks {
-		l.loaded = w == nil || w.ChunksLoaded(l.origin, loadRadius)
+		l.loaded = w == nil || w.ChunksLoaded(l.origin, g.rules.LoadRadius)
 	}
 	g.runPhase(phaseCache)
 	g.runPhase(phaseProducer)

@@ -232,3 +232,23 @@ func TestRemovalQueuesNeighbours(t *testing.T) {
 		t.Fatalf("wire past the gap: %d, want 0", got)
 	}
 }
+
+// A signal stops where the rules say.
+func TestSignalReachRule(t *testing.T) {
+	g := New()
+	if got, want := g.Rules(), DefaultRules(); got != want {
+		t.Fatalf("new system rules %+v, want %+v", got, want)
+	}
+	r := DefaultRules()
+	r.SignalReach = 3
+	g.SetRules(r)
+	c := g.Create(Pos{}, KindWire, Down)
+	if c.rules.SignalReach != 3 {
+		t.Errorf("component reach %d, want 3", c.rules.SignalReach)
+	}
+	other := New()
+	other.Merge(g)
+	if c.rules != other.rules {
+		t.Error("merged component kept its old system's rules")
+	}
+}

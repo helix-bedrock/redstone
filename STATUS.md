@@ -14,6 +14,8 @@ A piston is a consumer with one blocked face (`SetBlockedFace`).
 
 **Observers** are pulse capacitors, as in BDS; nothing new was needed for them here.
 
+**Numbers:** `Rules` holds signal reach, torch burn out, rail reach and load radius, with `DefaultRules` giving BDS's; `System.SetRules` and `System.Interval` change them while running.
+
 **Also here:** comparators restored from their saved output (`LoadSignal`), `SignalTick` for block
 actors that read on BDS's ticks, and `Merge` and `SplitOff` to move circuits between Systems without
 rebuilding them. Removal queues what BDS 1.26.60 queues.

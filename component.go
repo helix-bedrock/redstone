@@ -3,13 +3,6 @@ package redstone
 // maxPower is the strongest signal.
 const maxPower = 15
 
-// A torch flips until its count reaches burnOutFlips, then stops. The count stops
-// at burnOutLimit, where the torch stays burnt out until a neighbour changes.
-const (
-	burnOutFlips = 16
-	burnOutLimit = 33
-)
-
 // Phases a component evaluates in. They run cache, producer, other, lock.
 const (
 	phaseCache uint8 = 1 << iota
@@ -42,6 +35,8 @@ type dest struct {
 
 // Component is one part of a circuit, at one position.
 type Component struct {
+	// rules are the numbers of the System it is in.
+	rules              *Rules
 	kind               Kind
 	pos                Pos
 	chunk              Pos
@@ -102,8 +97,8 @@ type Component struct {
 }
 
 // newComponent makes a component of kind k with what every kind starts with.
-func newComponent(k Kind) *Component {
-	c := &Component{kind: k, first: true, dir: NoFace, allowDown: true}
+func newComponent(k Kind, rules *Rules) *Component {
+	c := &Component{rules: rules, kind: k, first: true, dir: NoFace, allowDown: true}
 	switch k {
 	case KindPowered:
 		c.conducts = true
@@ -177,7 +172,7 @@ func (c *Component) ResetBurnOut() {
 }
 
 // BurntOut reports whether the torch has flipped enough to burn out.
-func (c *Component) BurntOut() bool { return c.burn >= burnOutFlips }
+func (c *Component) BurntOut() bool { return c.burn >= c.rules.BurnOutFlips }
 
 // SetSubtract sets a comparator's mode.
 func (c *Component) SetSubtract(on bool) { c.subtract = on }
@@ -319,7 +314,7 @@ func (c *Component) evaluate() bool {
 		return on
 	case KindTorch:
 		c.on, c.half = c.nextOn, c.nextHalf
-		if c.chain != nil && !c.burned && c.burn < burnOutLimit {
+		if c.chain != nil && !c.burned && c.burn < c.rules.BurnOutLimit {
 			c.burn++
 		}
 		return c.changed
@@ -341,7 +336,7 @@ func (c *Component) evaluateRail() bool {
 	for i := range c.sources {
 		s := &c.sources[i]
 		if s.reach > int32(c.strength) && int32(s.c.Strength()) > s.damping {
-			c.strength = int16(s.reach) //nolint:gosec // at most railReach
+			c.strength = int16(s.reach) //nolint:gosec // at most RailReach
 		}
 	}
 	return c.strength != previous
@@ -525,13 +520,13 @@ func (c *Component) cacheTorch() {
 	best, looped := c.strongestSource()
 	var next, half, stop bool
 	if looped {
-		if !c.burned && c.burn < burnOutLimit {
+		if !c.burned && c.burn < c.rules.BurnOutLimit {
 			c.burn++
 		}
-		if c.burn < burnOutFlips {
+		if c.burn < c.rules.BurnOutFlips {
 			next, half = !c.on, true
 		} else {
-			half, stop = c.burn == burnOutFlips, c.burn >= burnOutLimit
+			half, stop = c.burn == c.rules.BurnOutFlips, c.burn >= c.rules.BurnOutLimit
 		}
 	} else {
 		c.burn, c.burned = 0, false
@@ -701,7 +696,7 @@ func (c *Component) findRing(g *System) bool {
 			last.chain = first
 			for k := 0; k+1 < len(ring); k++ {
 				ring[k].chain = ring[k+1]
-				last.burn = burnOutFlips
+				last.burn = c.rules.BurnOutFlips
 			}
 		}
 		found = true
@@ -735,9 +730,6 @@ func (c *Component) addSource(t *tracking, damping *int32, direct *bool) bool {
 	return false
 }
 
-// railReach is how far rails carry the power of one source: this rail and eight more.
-const railReach = 9
-
 // addToRail is BDS's rail transporter. Power from anything else starts a new reach;
 // power along the rails is what the rail before had, one shorter, still read from the
 // component the search began at.
@@ -747,7 +739,7 @@ func (c *Component) addToRail(t *tracking, damping *int32, direct *bool) bool {
 	}
 	if t.nearest.kind != KindRail {
 		return c.addRailSource(source{
-			c: t.origin.c, damping: max(*damping, 1) - 1, pos: t.origin.pos, face: t.current.face, direct: true, reach: railReach,
+			c: t.origin.c, damping: max(*damping, 1) - 1, pos: t.origin.pos, face: t.current.face, direct: true, reach: c.rules.RailReach,
 		})
 	}
 	added := false
