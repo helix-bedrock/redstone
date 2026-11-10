@@ -105,6 +105,12 @@ type System struct {
 	removals []pending
 
 	queue []tracking
+
+	// islands are the circuits that share nothing, for EvaluateParallel; stale is set
+	// when the graph changed since they were found. islandFn evaluates one.
+	islands  []island
+	stale    bool
+	islandFn func(i int)
 }
 
 // New returns an empty System.
@@ -303,6 +309,9 @@ func (g *System) SignalTick() bool { return g.counter < g.Interval }
 // and works out the paths they changed. w may be nil, in which case no powered
 // blocks are found.
 func (g *System) UpdateDependencies(w World) {
+	if len(g.removals) > 0 || len(g.adds) > 0 {
+		g.stale = true
+	}
 	for _, r := range g.removals {
 		g.removeNow(r.pos, r.c)
 	}
@@ -471,6 +480,7 @@ func (g *System) applyUpdates(w World) {
 	for _, c := range g.order {
 		c.updateDependencies(g)
 	}
+	g.stale = true
 }
 
 // findRelationships walks out from c along everything a signal can reach,
@@ -676,6 +686,7 @@ func (g *System) climbable(c *Component) bool {
 // have one and its own place in the interval: src's circuits may evaluate a tick
 // sooner or later once. src is empty afterwards. Neither may be ticking.
 func (g *System) Merge(src *System) {
+	g.stale, src.stale = true, true
 	for _, c := range src.order {
 		if _, ok := g.all[c.pos]; ok {
 			continue
@@ -732,6 +743,7 @@ func (g *System) RecheckWaiting(w World) {
 // two are cut, as the two tick apart from now on, and paths that used one are
 // worked out again. Neither may be ticking.
 func (g *System) SplitOff(to *System, in func(origin Pos) bool) {
+	g.stale, to.stale = true, true
 	to.Interval, to.counter = g.Interval, g.counter
 	*to.rules = *g.rules
 	moved := map[*Component]bool{}
@@ -807,15 +819,35 @@ func cutLinks(g *System, moved map[*Component]bool, isMoved bool) {
 // Evaluate runs one round of every loaded chunk's components, in BDS's phases:
 // all inputs are read, then producers and capacitors change, then everything
 // else, then repeaters lock. Chunks run in the order their first component came.
-func (g *System) Evaluate(w World) {
+func (g *System) Evaluate(w World) { g.EvaluateParallel(w, nil) }
+
+// Runner calls fn(i) once for each i in [0, n), on any goroutines, and returns once every
+// call has. Helix passes its Region.Parallel.
+type Runner func(n int, fn func(i int))
+
+// EvaluateParallel is Evaluate with the circuits that share nothing (islands) evaluated by
+// run, so an engine can spread them over cores. Each island still runs BDS's four phases
+// over its components in the order Evaluate would, and no island reads or changes another,
+// so the result is the same as Evaluate's on any number of cores. A nil run is Evaluate.
+func (g *System) EvaluateParallel(w World, run Runner) {
 	for _, l := range g.chunks {
 		l.loaded = w == nil || w.ChunksLoaded(l.origin, g.rules.LoadRadius)
 	}
-	g.runPhase(phaseCache)
-	g.runPhase(phaseProducer)
-	g.runPhase(phaseOther)
-	g.runPhase(phaseLock)
 	g.evaluated = true
+	if run == nil {
+		g.runPhase(phaseCache)
+		g.runPhase(phaseProducer)
+		g.runPhase(phaseOther)
+		g.runPhase(phaseLock)
+		return
+	}
+	if g.stale {
+		g.findIslands()
+	}
+	if g.islandFn == nil {
+		g.islandFn = g.evaluateIsland
+	}
+	run(len(g.islands), g.islandFn)
 }
 
 // runPhase runs one phase over all chunks.
@@ -825,21 +857,114 @@ func (g *System) runPhase(phase uint8) {
 			continue
 		}
 		for i := range l.entries {
-			e := &l.entries[i]
-			if e.phases&phase == 0 || e.c.removed {
-				continue
-			}
-			switch phase {
-			case phaseCache:
-				e.c.cache()
-			case phaseLock:
-				e.c.checkLock()
-			default:
-				if e.c.evaluate() {
-					e.c.needsUpdate = true
-				}
+			runEntry(&l.entries[i], phase)
+		}
+	}
+}
+
+// runEntry runs one phase of one component.
+func runEntry(e *entry, phase uint8) {
+	if e.phases&phase == 0 || e.c.removed {
+		return
+	}
+	switch phase {
+	case phaseCache:
+		e.c.cache()
+	case phaseLock:
+		e.c.checkLock()
+	default:
+		if e.c.evaluate() {
+			e.c.needsUpdate = true
+		}
+	}
+}
+
+// island is a circuit no other reaches: its components, in Evaluate's order.
+type island struct {
+	items []islandItem
+}
+
+// islandItem is one component of an island: entry i of chunk list l.
+type islandItem struct {
+	l *chunkList
+	i int
+}
+
+// evaluateIsland runs the four phases over island i.
+func (g *System) evaluateIsland(i int) {
+	items := g.islands[i].items
+	for _, phase := range [...]uint8{phaseCache, phaseProducer, phaseOther, phaseLock} {
+		for _, it := range items {
+			if it.l.loaded {
+				runEntry(&it.l.entries[it.i], phase)
 			}
 		}
+	}
+}
+
+// findIslands splits the components into islands: those linked as sources, sides,
+// destinations or torch rings share one. Islands and their components keep Evaluate's
+// order (chunks in order, components in each chunk's order), so the split is the same
+// every time.
+func (g *System) findIslands() {
+	g.stale = false
+	index := map[*Component]int{}
+	var at []islandItem
+	for _, l := range g.chunks {
+		for i := range l.entries {
+			index[l.entries[i].c] = len(at)
+			at = append(at, islandItem{l: l, i: i})
+		}
+	}
+	parent := make([]int, len(at))
+	for i := range parent {
+		parent[i] = i
+	}
+	var find func(i int) int
+	find = func(i int) int {
+		for parent[i] != i {
+			parent[i] = parent[parent[i]]
+			i = parent[i]
+		}
+		return i
+	}
+	join := func(a int, b *Component) {
+		j, ok := index[b]
+		if !ok {
+			return
+		}
+		ra, rb := find(a), find(j)
+		if ra != rb {
+			parent[max(ra, rb)] = min(ra, rb)
+		}
+	}
+	for i, it := range at {
+		c := it.l.entries[it.i].c
+		for k := range c.sources {
+			join(i, c.sources[k].c)
+		}
+		for k := range c.side {
+			join(i, c.side[k].c)
+		}
+		for k := range c.dests {
+			join(i, c.dests[k].c)
+		}
+		if c.chain != nil {
+			join(i, c.chain)
+		}
+	}
+	clear(g.islands)
+	g.islands = g.islands[:0]
+	of := map[int]int{}
+	for i, it := range at {
+		root := find(i)
+		n, ok := of[root]
+		if !ok {
+			n = len(g.islands)
+			of[root] = n
+			g.islands = append(g.islands, island{})
+		}
+		g.islands[n].items = append(g.islands[n].items, it)
 	}
 }
 
