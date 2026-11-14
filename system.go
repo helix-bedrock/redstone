@@ -97,7 +97,7 @@ type System struct {
 	chunks   []*chunkList
 	byChunk  map[Pos]*chunkList
 	relation map[Pos][]related
-	waiting  map[Pos][]Pos
+	waiting  map[Pos]*waitList
 
 	adds     []pending
 	updates  []pending
@@ -119,7 +119,7 @@ func New() *System {
 	return &System{
 		Interval: DefaultInterval, counter: DefaultInterval, rules: &rules,
 		all: map[Pos]*Component{}, byChunk: map[Pos]*chunkList{},
-		relation: map[Pos][]related{}, waiting: map[Pos][]Pos{}, updating: map[Pos]bool{},
+		relation: map[Pos][]related{}, waiting: map[Pos]*waitList{}, updating: map[Pos]bool{},
 	}
 }
 
@@ -264,7 +264,7 @@ func (g *System) ChunkLoaded(origin Pos) {
 	if !ok {
 		return
 	}
-	for _, pos := range list {
+	for _, pos := range list.order {
 		c := g.live(pos)
 		if c == nil {
 			continue
@@ -275,6 +275,29 @@ func (g *System) ChunkLoaded(origin Pos) {
 		}
 	}
 	delete(g.waiting, origin)
+}
+
+// waitList is the positions whose paths stopped at one unloaded chunk, each once, in the order
+// they came, so ChunkLoaded works them out in the same order on any run.
+type waitList struct {
+	order []Pos
+	has   map[Pos]struct{}
+}
+
+// wait remembers that the paths of pos stopped at the unloaded chunk at origin. A position is
+// kept once however often its paths are walked while the chunk stays unloaded: a clock beside
+// one would otherwise add itself on every pulse for as long as the chunk is away.
+func (g *System) wait(origin, pos Pos) {
+	l, ok := g.waiting[origin]
+	if !ok {
+		l = &waitList{has: map[Pos]struct{}{}}
+		g.waiting[origin] = l
+	}
+	if _, ok := l.has[pos]; ok {
+		return
+	}
+	l.has[pos] = struct{}{}
+	l.order = append(l.order, pos)
 }
 
 // schedule queues a producer or capacitor to have its paths worked out again.
@@ -519,7 +542,7 @@ func (g *System) findBlocks(pos Pos, w World) {
 			continue
 		}
 		if !w.Loaded(n) {
-			g.waiting[n.Chunk()] = append(g.waiting[n.Chunk()], pos)
+			g.wait(n.Chunk(), pos)
 			continue
 		}
 		power := w.BlockPower(n)
@@ -709,8 +732,10 @@ func (g *System) Merge(src *System) {
 	for pos, list := range src.relation {
 		g.relation[pos] = append(g.relation[pos], list...)
 	}
-	for pos, list := range src.waiting {
-		g.waiting[pos] = append(g.waiting[pos], list...)
+	for origin, list := range src.waiting {
+		for _, pos := range list.order {
+			g.wait(origin, pos)
+		}
 	}
 	for pos := range src.updating {
 		g.updating[pos] = true
